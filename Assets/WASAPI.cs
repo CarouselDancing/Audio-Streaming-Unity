@@ -5,7 +5,7 @@ using UnityEngine;
 using System.Runtime.InteropServices;
 public class WASAPI : MonoBehaviour
 {
-    const string dll = "WASAPI-Audio";
+    const string dll = "Audio-Client";
     [DllImport(dll)]
     private static extern bool Init();
     [DllImport(dll)]

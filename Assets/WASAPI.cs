@@ -52,7 +52,13 @@ public class WASAPI : MonoBehaviour
 
     public int numRecBytes = 0, numReceived = 0;
     public int numCapBytes = 0, numCaptured = 0;
-
+    const int maxBytes = 1000000;
+    public byte[] collectedBytes = new byte[maxBytes];
+    public float[] samples = new float[maxBytes / 4];
+    public bool arrayFilled = false;
+    int arrayIndex = 0;
+    public AudioClip capturedClip;
+    public AudioSource source;
     private void Update()
     {
         byte[] capturedBytes = CapturedBytes();
@@ -61,12 +67,35 @@ public class WASAPI : MonoBehaviour
         {
             numCapBytes = capturedBytes.Length;
             numCaptured++;
+            if (arrayIndex < maxBytes - 1)
+            {
+                int toCopy = (arrayIndex + capturedBytes.Length > maxBytes - 1) ? maxBytes - 1 - arrayIndex : capturedBytes.Length;
+                Array.Copy(capturedBytes, 0, collectedBytes, arrayIndex, toCopy);
+/*                for (int i = 0; i < toCopy; i++)
+                {
+                    collectedBytes[i + arrayIndex] = capturedBytes[i];
+                }*/
+                arrayIndex += toCopy;
+            }
+            else if (arrayFilled == false)
+            {
+                arrayFilled = true;
+                for (int i = 0; i < samples.Length; i++)
+                {
+                    samples[i] = BitConverter.ToSingle(collectedBytes, i * 4) / 0x80000000;
+                }
+                capturedClip = AudioClip.Create("CapturedAudio", samples.Length, 1, 44100, false);
+                capturedClip.SetData(samples, 0);
+                source.clip = capturedClip;
+                source.Play();
+            }
         }
         if (receivedBytes.Length > 0)
         {
             numRecBytes = receivedBytes.Length;
             numReceived++;
         }
+
     }
 
     private void OnApplicationQuit()

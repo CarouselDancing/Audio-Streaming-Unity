@@ -5,21 +5,32 @@ using UnityEngine;
 using System.Runtime.InteropServices;
 public class WASAPI : MonoBehaviour
 {
+    // Native plugin functions
     const string dll = "Audio-Client";
     [DllImport(dll)]
-    private static extern bool Init();
+    private static extern bool Init(int size, int maxPacks); // Initializes plugin functionality
     [DllImport(dll)]
-    private static extern bool Shutdown();
+    private static extern bool Shutdown(); // Shuts down plugin functionality
     [DllImport(dll)]
-    private static extern void StartThreads();
+    private static extern void StartThreads(); // Starts threads for capture and data sending/receiving
     [DllImport(dll)]
-    private static extern IntPtr GetCapturedBytes(out int outSize);
-    [DllImport(dll)]
-    private static extern IntPtr GetReceivedBytes(out int outSize);
+    private static extern IntPtr GetPacket(out bool packetAvailable, out int numPackets); // Gets audio bytes received from network
+
+
+    // Public variables
+    public AudioSource audioSource;
+    public int maxPackets = 32, numberOfPackets = 0;
+    public const int packetSize = 256;
+    //byte[] receivedPacket = new byte[packetSize];
+    //float[] samples = new float[packetSize / 4];
+    public float maxSample = -15f, minSample = 15f;
+    bool initialized = false;
+    AudioClip audioClip;
     void Start()
     {
-        if (Init())
+        if (Init(packetSize, maxPackets))
         {
+            initialized = true;
             Debug.Log("Init success");
             StartThreads();
             Debug.Log("Threads started");
@@ -28,85 +39,56 @@ public class WASAPI : MonoBehaviour
         {
             Debug.Log("Init failed");
         }
-
-
     }
 
-    byte[] CapturedBytes()
+    byte[] ReceivedBytes(out bool packetAvailable, out int numPackets) // Get received audio packets from native plugin
     {
-        int size = 0;
-        IntPtr capturedBytes = GetCapturedBytes(out size);
-        byte[] bytes = new byte[size];
-        Marshal.Copy(capturedBytes, bytes, 0, size);
+        IntPtr receivedBytes = GetPacket(out packetAvailable, out numPackets);
+        byte[] bytes = new byte[packetSize * numPackets];
+        Marshal.Copy(receivedBytes, bytes, 0, packetSize * numPackets);
         return bytes;
     }
 
-    byte[] ReceivedBytes()
+    void ClipFromPacket(byte[] inPackets) // Create an audio clip from the received data packets and play the audio clip
     {
-        int size = 0;
-        IntPtr receivedBytes = GetReceivedBytes(out size);
-        byte[] bytes = new byte[size];
-        Marshal.Copy(receivedBytes, bytes, 0, size);
-        return bytes;
+        float[] samples = new float[inPackets.Length / 4];
+
+        for (int i = 0; i < samples.Length; i++)
+        {
+            samples[i] = BitConverter.ToSingle(inPackets, i * 4);
+        }
+        audioClip = AudioClip.Create("ReceivedAudio", samples.Length, 2, 44100, false);
+        audioClip.SetData(samples, 0);
+        //audioSource.clip = audioClip;
+        audioSource.PlayOneShot(audioClip);
     }
 
-    public int numRecBytes = 0, numReceived = 0;
-    public int numCapBytes = 0, numCaptured = 0;
-    const int maxBytes = 1000000;
-    public byte[] collectedBytes = new byte[maxBytes];
-    public float[] samples = new float[maxBytes / 4];
-    public bool arrayFilled = false;
-    int arrayIndex = 0;
-    public AudioClip capturedClip;
-    public AudioSource source;
-    private void Update()
+    private void FixedUpdate()
     {
-        byte[] capturedBytes = CapturedBytes();
-        byte[] receivedBytes = ReceivedBytes();
-        if (capturedBytes.Length > 0)
+        if (initialized)
         {
-            numCapBytes = capturedBytes.Length;
-            numCaptured++;
-            if (arrayIndex < maxBytes - 1)
-            {
-                int toCopy = (arrayIndex + capturedBytes.Length > maxBytes - 1) ? maxBytes - 1 - arrayIndex : capturedBytes.Length;
-                Array.Copy(capturedBytes, 0, collectedBytes, arrayIndex, toCopy);
-/*                for (int i = 0; i < toCopy; i++)
-                {
-                    collectedBytes[i + arrayIndex] = capturedBytes[i];
-                }*/
-                arrayIndex += toCopy;
-            }
-            else if (arrayFilled == false)
-            {
-                arrayFilled = true;
-                for (int i = 0; i < samples.Length; i++)
-                {
-                    samples[i] = BitConverter.ToSingle(collectedBytes, i * 4) / 0x80000000;
-                }
-                capturedClip = AudioClip.Create("CapturedAudio", samples.Length, 1, 44100, false);
-                capturedClip.SetData(samples, 0);
-                source.clip = capturedClip;
-                source.Play();
-            }
-        }
-        if (receivedBytes.Length > 0)
-        {
-            numRecBytes = receivedBytes.Length;
-            numReceived++;
-        }
+            bool packetAvailable = false;
+            byte[] packet = ReceivedBytes(out packetAvailable, out numberOfPackets);
 
+            if (packetAvailable) // If packets are available made audio clip
+            {
+                ClipFromPacket(packet);
+            }
+        }
     }
 
     private void OnApplicationQuit()
     {
-        if (Shutdown())
+        if (initialized)
         {
-            Debug.Log("Shutdown success");
-        }
-        else
-        {
-            Debug.Log("Shutdown failed");
+            if (Shutdown())
+            {
+                Debug.Log("Shutdown success");
+            }
+            else
+            {
+                Debug.Log("Shutdown failed");
+            }
         }
     }
 }

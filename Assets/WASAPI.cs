@@ -8,7 +8,7 @@ public class WASAPI : MonoBehaviour
     // Native plugin functions
     const string dll = "Audio-Client";
     [DllImport(dll)]
-    private static extern bool Init(int size, int maxPacks); // Initializes plugin functionality
+    private static extern bool Init(int size, int maxPacks, int deviceIndex); // Initializes plugin functionality
     [DllImport(dll)]
     private static extern bool Shutdown(); // Shuts down plugin functionality
     [DllImport(dll)]
@@ -18,6 +18,8 @@ public class WASAPI : MonoBehaviour
 
 
     // Public variables
+    [HideInInspector]
+    public int SelectedDevice;
     public AudioSource audioSource;
     public int maxPackets = 32, numberOfPackets = 0;
     public const int packetSize = 256;
@@ -28,7 +30,7 @@ public class WASAPI : MonoBehaviour
     AudioClip audioClip;
     void Start()
     {
-        if (Init(packetSize, maxPackets))
+        if (Init(packetSize, maxPackets, SelectedDevice))
         {
             initialized = true;
             Debug.Log("Init success");
@@ -59,7 +61,6 @@ public class WASAPI : MonoBehaviour
         }
         audioClip = AudioClip.Create("ReceivedAudio", samples.Length, 2, 44100, false);
         audioClip.SetData(samples, 0);
-        //audioSource.clip = audioClip;
         audioSource.PlayOneShot(audioClip);
     }
 

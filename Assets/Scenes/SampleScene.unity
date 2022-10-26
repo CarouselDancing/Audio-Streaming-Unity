@@ -264,6 +264,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 9590603cb6d9b8f41b70e2452ddedc9b, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  SelectedDevice: 0
   audioSource: {fileID: 90937401}
   maxPackets: 32
   numberOfPackets: 0

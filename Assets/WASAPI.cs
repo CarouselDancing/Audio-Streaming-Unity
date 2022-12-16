@@ -14,112 +14,143 @@ public class WASAPI : MonoBehaviour
     private static extern void Init(); // Initializes plugin functionality
     [DllImport(dll)]
     private static extern void Shutdown(); // Shuts down plugin functionality
-/*    [DllImport(dll)]
-    private static extern void StartThreads(); // Starts threads for capture and data sending/receiving*/
+
     [DllImport(dll)]
-    private static extern IntPtr GetPacket(out int numBytes, out int numChannels, out int outSampleRate); // Gets audio bytes received from network
+    private static extern IntPtr GetPacket(out int numSamples, out int numChannels, out int outSampleRate); // Gets audio bytes received from network
 
+    [DllImport(dll)]
+    private static extern void StartThread(myCallbackDelegate cb); // Starts read thread and passes delegate for callback
 
-    // Public variables
-    public int SelectedDevice;
-    public float[] publicSamples;
-    // Private variables
+    [System.Serializable]
+    public class AudioBuffer
+    {
+        public AudioSource audioSource;
+        public List<float> audioBuffer;
+        public Coroutine coroutine;
+        public int lastPacketNum = 0;
+        public int numIndices = 2;
+        public int prevTime = -1;
+        public int writeIndex = 0;
+        public bool clipInit = false;
+        public void ResetBuffer()
+        {
+            audioSource.clip.SetData(new float[audioSource.clip.samples], 0);
+            audioSource.Stop();
+        }
+    }
+    public AudioBuffer streamedAudio;
 
-    //public int packetSize = 20480, maxPackets = 10;
-    private AudioSource audioSource;
-    private AudioClip audioClip;
-    private bool initialized = false;
-    private bool paramsSelected = false;
-    public int channels = -1, sampleRate = -1;
+    private bool paramsSelected = false, bufferInitialized = false;
+    //private int sampleRate, numChannels;
+    private const int bufferSize = 100000;
 
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    delegate void myCallbackDelegate(int a);
+
+    myCallbackDelegate callbackDelegate;
     void Start()
     {
-        audioSource = GetComponent<AudioSource>();
+        callbackDelegate = new myCallbackDelegate(this.GetMicData);
         Init();
-        initialized = true;
-/*        if ()
-        {
-            initialized = true;
-            Debug.Log("Init success");
-            //StartThreads();
-            //Debug.Log("Threads started");
-        }
-        else
-        {
-            Debug.Log("Init failed");
-        }*/
+        StartThread(callbackDelegate);
+        InitBuffer(2, 48000);
     }
 
-    private void FixedUpdate()
+    void InitBuffer(int numChannels, int sampleRate)
     {
-        if (initialized)
-        {
-            //bool packetAvailable = false;
-            byte[] packet = ReceivedBytes();
-
-            if (packet.Length > 0) // If packets are available made audio clip
-            {
-                //Debug.Log("Packet Read");
-                // Debug.Log(packet.Length + " Bytes");
-                ClipFromPacket(packet);
-            }
-/*            else
-            {
-                Debug.Log("No Packet");
-            }*/
-        }
+        bufferInitialized = true;
+        streamedAudio = new AudioBuffer();
+        streamedAudio.audioSource = GetComponent<AudioSource>();
+        streamedAudio.audioSource.clip = AudioClip.Create("StreamedAudio", sampleRate * streamedAudio.numIndices, numChannels, sampleRate, false);
+        streamedAudio.audioBuffer = new List<float>(bufferSize);
+        streamedAudio.coroutine = StartCoroutine(UpdateAudioSource());
+        streamedAudio.audioSource.loop = true;
     }
 
     private void OnApplicationQuit()
     {
-        if (initialized)
-        {
-            Shutdown();
-        }
+        Shutdown();
     }
 
-    public void ResetPlugin()
+/*    private void Update()
     {
-        if (initialized)
+        if (paramsSelected && !bufferInitialized)
         {
-            Shutdown();
+            InitBuffer();
         }
+    }*/
 
-        Init();
-        initialized = true;
-    }
-
-    private byte[] ReceivedBytes() // Get received audio packets from native plugin
+    // Callback function that gets available audio data once it becomes available and adds it to the buffer
+    void GetMicData(int packetNum)
     {
-        int numBytes;
-        IntPtr receivedBytes = GetPacket(out numBytes, out channels, out sampleRate);
-/*        if (!paramsSelected)
-        {*/
-            //sampleRate = IndexToSampleRate(sampleRateIndex);
-/*            paramsSelected = true;
-        }*/
-
-        //Debug.Log("Channels: " + channels + ", Sample rate index: " + sampleRate);
-        //Debug.Log("Num packets: " + numPackets);
-        byte[] bytes = new byte[numBytes];
-        Marshal.Copy(receivedBytes, bytes, 0, numBytes);
-        return bytes;
-    }
-
-    private void ClipFromPacket(byte[] inPackets) // Create an audio clip from the received data packets and play the audio clip
-    {
-        float[] samples = new float[inPackets.Length / 4];
-
-        for (int i = 0; i < samples.Length; i++)
+        if (streamedAudio.lastPacketNum >= packetNum)
         {
-            samples[i] = BitConverter.ToSingle(inPackets, i * 4);
+            return;
         }
-        publicSamples = samples;
-        audioClip = AudioClip.Create("ReceivedAudio", samples.Length, channels, sampleRate, false);
-        audioClip.SetData(samples, 0);
-       // Debug.Log("Sample rate: " + sampleRate + ", Channels: " + channels + ", Samples: " + samples.Length); 
+        streamedAudio.lastPacketNum = packetNum;
 
-        audioSource.PlayOneShot(audioClip);
+        int numSamples, numChannels, sampleRate;
+        IntPtr receivedBytes = GetPacket(out numSamples, out numChannels, out sampleRate);
+        paramsSelected = true;
+
+        if (numSamples > 0)
+        {
+            float[] samples = new float[numSamples];
+            Marshal.Copy(receivedBytes, samples, 0, numSamples);
+
+            if (numSamples + streamedAudio.audioBuffer.Count > streamedAudio.audioBuffer.Capacity)
+            {
+                streamedAudio.audioBuffer.RemoveRange(0, numSamples);
+            }
+            streamedAudio.audioBuffer.AddRange(samples);
+        }
+    }
+    public int readIndex = 0, writeIndex = 0, samplesToWrite = 0;
+    // Fills the audio clip with data from the buffer
+    IEnumerator UpdateAudioSource()
+    {
+        bool updating = true;
+        int prevTime = 0;
+        while (updating)
+        {
+
+            if (streamedAudio.audioBuffer.Count > 0)
+            {
+                int endPoint = (streamedAudio.writeIndex < streamedAudio.audioSource.timeSamples) ? streamedAudio.audioSource.timeSamples : streamedAudio.audioSource.clip.samples;
+                int toWrite = (streamedAudio.audioBuffer.Count < endPoint - streamedAudio.writeIndex) ? streamedAudio.audioBuffer.Count : endPoint - streamedAudio.writeIndex;
+                if (toWrite % 2 != 0)
+                {
+                    toWrite--;
+                }
+
+                if (toWrite <= 0)
+                {
+                    continue;
+                }
+
+                Debug.Log(toWrite);
+                int prevIndex = streamedAudio.writeIndex;
+                streamedAudio.audioSource.clip.SetData(streamedAudio.audioBuffer.GetRange(0, toWrite - 1).ToArray(), streamedAudio.writeIndex);
+                streamedAudio.audioBuffer.RemoveRange(0, toWrite - 1);
+
+
+                streamedAudio.writeIndex = (streamedAudio.writeIndex + (int)(toWrite * 0.5f) >= streamedAudio.audioSource.clip.samples - 1) ? 0 : streamedAudio.writeIndex + (int)(toWrite * 0.5f);
+
+                //Debug.Log("Wrote from " + prevIndex + " to " + streamedAudio.writeIndex + ", Played from " + prevTime + " to " + streamedAudio.audioSource.timeSamples);
+
+                prevTime = streamedAudio.audioSource.timeSamples;
+
+                if (!streamedAudio.audioSource.isPlaying)
+                {
+                    streamedAudio.audioSource.Play();
+                }
+                //yield return new WaitForSeconds(1f);
+            }
+            //Debug.Log(streamedAudio.audioSource.time + " of " + streamedAudio.audioSource.clip.length);
+            //Debug.Log((streamedAudio.audioSource.clip.length));
+
+            yield return null;
+        }
     }
 }
 

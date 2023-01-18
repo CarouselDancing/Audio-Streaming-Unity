@@ -11,12 +11,12 @@ public class WASAPI : MonoBehaviour
     // Native plugin functions
     const string dll = "mic_reader";
     [DllImport(dll)]
-    private static extern void Init(); // Initializes plugin functionality
+    private static extern void Init(int inSize); // Initializes plugin functionality
     [DllImport(dll)]
     private static extern void Shutdown(); // Shuts down plugin functionality
 
     [DllImport(dll)]
-    private static extern IntPtr GetPacket(out int numSamples, out int numChannels, out int outSampleRate); // Gets audio bytes received from network
+    private static extern IntPtr GetPacket(out int numChannels, out int outSampleRate); // Gets audio bytes received from network
 
     [DllImport(dll)]
     private static extern void StartThread(myCallbackDelegate cb); // Starts read thread and passes delegate for callback
@@ -28,7 +28,7 @@ public class WASAPI : MonoBehaviour
         public List<float> audioBuffer;
         public Coroutine coroutine;
         public int lastPacketNum = 0;
-        public int numIndices = 2;
+        public int numIndices = 5;
         public int prevTime = -1;
         public int writeIndex = 0;
         public bool clipInit = false;
@@ -42,16 +42,22 @@ public class WASAPI : MonoBehaviour
 
     private bool paramsSelected = false, bufferInitialized = false;
     //private int sampleRate, numChannels;
-    private const int bufferSize = 100000;
-
+    private const int bufferSize = 960000;
+    
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     delegate void myCallbackDelegate(int a);
 
     myCallbackDelegate callbackDelegate;
+
+    private const int packetSize = 96000;
+    float[] packet;
+
     void Start()
     {
         callbackDelegate = new myCallbackDelegate(this.GetMicData);
-        Init();
+        Init(packetSize);
+        packet = new float[packetSize];
+
         StartThread(callbackDelegate);
         InitBuffer(2, 48000);
     }
@@ -61,10 +67,38 @@ public class WASAPI : MonoBehaviour
         bufferInitialized = true;
         streamedAudio = new AudioBuffer();
         streamedAudio.audioSource = GetComponent<AudioSource>();
-        streamedAudio.audioSource.clip = AudioClip.Create("StreamedAudio", sampleRate * streamedAudio.numIndices, numChannels, sampleRate, false);
         streamedAudio.audioBuffer = new List<float>(bufferSize);
-        streamedAudio.coroutine = StartCoroutine(UpdateAudioSource());
+        streamedAudio.audioSource.clip = AudioClip.Create("StreamedAudio", 4096, numChannels, sampleRate, true, OnAudioRead);
+        //streamedAudio.coroutine = StartCoroutine(UpdateAudioSource());
         streamedAudio.audioSource.loop = true;
+        streamedAudio.audioSource.Play();
+    }
+
+    bool applying = false;
+    void OnAudioRead(float[] data)
+    {
+        //Debug.Log(data.Length); 
+        if (streamedAudio.audioBuffer.Count == 0 || applying)
+        {
+            return;
+        }
+
+        applying = true;
+        int toWrite = (data.Length > streamedAudio.audioBuffer.Count) ? streamedAudio.audioBuffer.Count : data.Length;
+        Debug.Log("ToWrite: " + toWrite + " Buffer: " + streamedAudio.audioBuffer.Count + " Data: "+ data.Length);
+        for (int i = 0; i < toWrite; i++)
+        {
+            data[i] = streamedAudio.audioBuffer[i];
+            //streamedAudio.audioBuffer.RemoveAt(0);
+        }
+        streamedAudio.audioBuffer.RemoveRange(0, toWrite);
+        applying = false;
+    }
+
+    int TimeSinceEpoch()
+    {
+        System.DateTime epochStart = new System.DateTime(1970, 1, 1, 0, 0, 0, System.DateTimeKind.Utc);
+        return (int)(System.DateTime.UtcNow - epochStart).TotalMilliseconds;
     }
 
     private void OnApplicationQuit()
@@ -72,40 +106,28 @@ public class WASAPI : MonoBehaviour
         Shutdown();
     }
 
-/*    private void Update()
-    {
-        if (paramsSelected && !bufferInitialized)
-        {
-            InitBuffer();
-        }
-    }*/
-
     // Callback function that gets available audio data once it becomes available and adds it to the buffer
     void GetMicData(int packetNum)
     {
-        if (streamedAudio.lastPacketNum >= packetNum)
+        if (streamedAudio.lastPacketNum > packetNum)
         {
             return;
         }
         streamedAudio.lastPacketNum = packetNum;
 
-        int numSamples, numChannels, sampleRate;
-        IntPtr receivedBytes = GetPacket(out numSamples, out numChannels, out sampleRate);
-        paramsSelected = true;
+        int numChannels, sampleRate;
+        IntPtr receivedBytes = GetPacket(out numChannels, out sampleRate);
 
-        if (numSamples > 0)
+        Marshal.Copy(receivedBytes, packet, 0, packetSize);
+
+        if (packetSize + streamedAudio.audioBuffer.Count > streamedAudio.audioBuffer.Capacity)
         {
-            float[] samples = new float[numSamples];
-            Marshal.Copy(receivedBytes, samples, 0, numSamples);
-
-            if (numSamples + streamedAudio.audioBuffer.Count > streamedAudio.audioBuffer.Capacity)
-            {
-                streamedAudio.audioBuffer.RemoveRange(0, numSamples);
-            }
-            streamedAudio.audioBuffer.AddRange(samples);
+            streamedAudio.audioBuffer.RemoveRange(0, packetSize);
         }
+        streamedAudio.audioBuffer.AddRange(packet);
+        //Debug.Log(streamedAudio.audioBuffer.Count);
     }
-    public int readIndex = 0, writeIndex = 0, samplesToWrite = 0;
+
     // Fills the audio clip with data from the buffer
     IEnumerator UpdateAudioSource()
     {
@@ -116,25 +138,22 @@ public class WASAPI : MonoBehaviour
 
             if (streamedAudio.audioBuffer.Count > 0)
             {
-                int endPoint = (streamedAudio.writeIndex < streamedAudio.audioSource.timeSamples) ? streamedAudio.audioSource.timeSamples : streamedAudio.audioSource.clip.samples;
+                int endPoint = (streamedAudio.writeIndex < streamedAudio.audioSource.timeSamples * 2) ? streamedAudio.audioSource.timeSamples * 2 : streamedAudio.audioSource.clip.samples * 2;
                 int toWrite = (streamedAudio.audioBuffer.Count < endPoint - streamedAudio.writeIndex) ? streamedAudio.audioBuffer.Count : endPoint - streamedAudio.writeIndex;
-                if (toWrite % 2 != 0)
-                {
-                    toWrite--;
-                }
 
-                if (toWrite <= 0)
+                if (toWrite % 2 != 0 || toWrite <= 0)
                 {
                     continue;
                 }
 
+
                 Debug.Log(toWrite);
                 int prevIndex = streamedAudio.writeIndex;
-                streamedAudio.audioSource.clip.SetData(streamedAudio.audioBuffer.GetRange(0, toWrite - 1).ToArray(), streamedAudio.writeIndex);
-                streamedAudio.audioBuffer.RemoveRange(0, toWrite - 1);
+                streamedAudio.audioSource.clip.SetData(streamedAudio.audioBuffer.GetRange(0, toWrite).ToArray(), streamedAudio.writeIndex / 2);
+                streamedAudio.audioBuffer.RemoveRange(0, toWrite);
 
 
-                streamedAudio.writeIndex = (streamedAudio.writeIndex + (int)(toWrite * 0.5f) >= streamedAudio.audioSource.clip.samples - 1) ? 0 : streamedAudio.writeIndex + (int)(toWrite * 0.5f);
+                streamedAudio.writeIndex = (streamedAudio.writeIndex + toWrite >= (streamedAudio.audioSource.clip.samples - 1) * 2) ? 0 : streamedAudio.writeIndex + toWrite;
 
                 //Debug.Log("Wrote from " + prevIndex + " to " + streamedAudio.writeIndex + ", Played from " + prevTime + " to " + streamedAudio.audioSource.timeSamples);
 
@@ -144,14 +163,13 @@ public class WASAPI : MonoBehaviour
                 {
                     streamedAudio.audioSource.Play();
                 }
-                //yield return new WaitForSeconds(1f);
             }
-            //Debug.Log(streamedAudio.audioSource.time + " of " + streamedAudio.audioSource.clip.length);
-            //Debug.Log((streamedAudio.audioSource.clip.length));
 
             yield return null;
         }
     }
+
+
 }
 
 /*// Custom editor functionality for audio plugin

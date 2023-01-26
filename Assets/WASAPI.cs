@@ -11,15 +11,18 @@ public class WASAPI : MonoBehaviour
     // Native plugin functions
     const string dll = "mic_reader";
     [DllImport(dll)]
-    private static extern void Init(int inSize); // Initializes plugin functionality
+    private static extern int Init(); // Initializes plugin functionality
     [DllImport(dll)]
     private static extern void Shutdown(); // Shuts down plugin functionality
 
-    [DllImport(dll)]
-    private static extern IntPtr GetPacket(out int numChannels, out int outSampleRate); // Gets audio bytes received from network
+/*    [DllImport(dll)]
+    private static extern IntPtr GetPacket(out int numChannels, out int outSampleRate); // Gets audio bytes received from network*/
 
     [DllImport(dll)]
-    private static extern void StartThread(myCallbackDelegate cb); // Starts read thread and passes delegate for callback
+    private static extern IntPtr GetPacket(out bool packetAvailable, out int numChannels, out int outSampleRate, out UInt64 time); // Gets audio bytes received from network
+
+    [DllImport(dll)]
+    private static extern void StartThread(); // Starts read thread and passes delegate for callback
 
     [System.Serializable]
     public class AudioBuffer
@@ -43,22 +46,16 @@ public class WASAPI : MonoBehaviour
     private bool paramsSelected = false, bufferInitialized = false;
     //private int sampleRate, numChannels;
     private const int bufferSize = 960000;
-    
-    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-    delegate void myCallbackDelegate(int a);
 
-    myCallbackDelegate callbackDelegate;
-
-    private const int packetSize = 96000;
+    private int packetSize;
     float[] packet;
 
     void Start()
     {
-        callbackDelegate = new myCallbackDelegate(this.GetMicData);
-        Init(packetSize);
+        packetSize = Init();
         packet = new float[packetSize];
 
-        StartThread(callbackDelegate);
+        StartThread();
         InitBuffer(2, 48000);
     }
 
@@ -68,108 +65,60 @@ public class WASAPI : MonoBehaviour
         streamedAudio = new AudioBuffer();
         streamedAudio.audioSource = GetComponent<AudioSource>();
         streamedAudio.audioBuffer = new List<float>(bufferSize);
-        streamedAudio.audioSource.clip = AudioClip.Create("StreamedAudio", 4096, numChannels, sampleRate, true, OnAudioRead);
+        streamedAudio.audioSource.clip = AudioClip.Create("StreamedAudio", 4096, numChannels, sampleRate, true, ReadAudio);
         //streamedAudio.coroutine = StartCoroutine(UpdateAudioSource());
         streamedAudio.audioSource.loop = true;
         streamedAudio.audioSource.Play();
     }
 
-    bool applying = false;
-    void OnAudioRead(float[] data)
+    void ReadAudio(float[] data)
     {
-        //Debug.Log(data.Length); 
-        if (streamedAudio.audioBuffer.Count == 0 || applying)
+        int dataRemaining = data.Length;
+        if (streamedAudio.audioBuffer.Count > 0) // Copy data from the buffer before pulling new data from native
         {
-            return;
+            int toCopy = (data.Length > streamedAudio.audioBuffer.Count) ? streamedAudio.audioBuffer.Count : data.Length;
+            Array.Copy(streamedAudio.audioBuffer.ToArray(), data, toCopy);
+            streamedAudio.audioBuffer.RemoveRange(0, toCopy);
+            dataRemaining -= toCopy;
         }
 
-        applying = true;
-        int toWrite = (data.Length > streamedAudio.audioBuffer.Count) ? streamedAudio.audioBuffer.Count : data.Length;
-        Debug.Log("ToWrite: " + toWrite + " Buffer: " + streamedAudio.audioBuffer.Count + " Data: "+ data.Length);
-        for (int i = 0; i < toWrite; i++)
+        if (dataRemaining > 0) // If more data is needed pull from native and add excess to the buffer
         {
-            data[i] = streamedAudio.audioBuffer[i];
-            //streamedAudio.audioBuffer.RemoveAt(0);
+            bool packetAvailable = false;
+            int numChannels, sampleRate;
+            UInt64 packetTime;
+            IntPtr receivedSamples = GetPacket(out packetAvailable, out numChannels, out sampleRate, out packetTime);
+            if (packetAvailable)
+            {
+                Marshal.Copy(receivedSamples, packet, 0, packetSize);
+                ulong latency = TimeSinceEpoch() - packetTime;
+                Debug.Log(latency + "ms");
+                int packetRemaining = packetSize;
+                int toCopy = (packetSize > dataRemaining) ? dataRemaining : packetSize;
+
+                Array.Copy(packet, 0, data, data.Length - dataRemaining, toCopy);
+                packetRemaining -= toCopy;
+
+                if (packetRemaining > 0) // Move the rest of the packet to the buffer
+                {
+                    float[] remainingPacket = new float[packetRemaining];
+                    Array.Copy(packet, packet.Length - packetRemaining, remainingPacket, 0, packetRemaining);
+                    streamedAudio.audioBuffer.AddRange(remainingPacket);
+                }
+            }
         }
-        streamedAudio.audioBuffer.RemoveRange(0, toWrite);
-        applying = false;
     }
 
-    int TimeSinceEpoch()
+    ulong TimeSinceEpoch()
     {
         System.DateTime epochStart = new System.DateTime(1970, 1, 1, 0, 0, 0, System.DateTimeKind.Utc);
-        return (int)(System.DateTime.UtcNow - epochStart).TotalMilliseconds;
+        return (ulong)(System.DateTime.UtcNow - epochStart).TotalMilliseconds;
     }
 
     private void OnApplicationQuit()
     {
         Shutdown();
-    }
-
-    // Callback function that gets available audio data once it becomes available and adds it to the buffer
-    void GetMicData(int packetNum)
-    {
-        if (streamedAudio.lastPacketNum > packetNum)
-        {
-            return;
-        }
-        streamedAudio.lastPacketNum = packetNum;
-
-        int numChannels, sampleRate;
-        IntPtr receivedBytes = GetPacket(out numChannels, out sampleRate);
-
-        Marshal.Copy(receivedBytes, packet, 0, packetSize);
-
-        if (packetSize + streamedAudio.audioBuffer.Count > streamedAudio.audioBuffer.Capacity)
-        {
-            streamedAudio.audioBuffer.RemoveRange(0, packetSize);
-        }
-        streamedAudio.audioBuffer.AddRange(packet);
-        //Debug.Log(streamedAudio.audioBuffer.Count);
-    }
-
-    // Fills the audio clip with data from the buffer
-    IEnumerator UpdateAudioSource()
-    {
-        bool updating = true;
-        int prevTime = 0;
-        while (updating)
-        {
-
-            if (streamedAudio.audioBuffer.Count > 0)
-            {
-                int endPoint = (streamedAudio.writeIndex < streamedAudio.audioSource.timeSamples * 2) ? streamedAudio.audioSource.timeSamples * 2 : streamedAudio.audioSource.clip.samples * 2;
-                int toWrite = (streamedAudio.audioBuffer.Count < endPoint - streamedAudio.writeIndex) ? streamedAudio.audioBuffer.Count : endPoint - streamedAudio.writeIndex;
-
-                if (toWrite % 2 != 0 || toWrite <= 0)
-                {
-                    continue;
-                }
-
-
-                Debug.Log(toWrite);
-                int prevIndex = streamedAudio.writeIndex;
-                streamedAudio.audioSource.clip.SetData(streamedAudio.audioBuffer.GetRange(0, toWrite).ToArray(), streamedAudio.writeIndex / 2);
-                streamedAudio.audioBuffer.RemoveRange(0, toWrite);
-
-
-                streamedAudio.writeIndex = (streamedAudio.writeIndex + toWrite >= (streamedAudio.audioSource.clip.samples - 1) * 2) ? 0 : streamedAudio.writeIndex + toWrite;
-
-                //Debug.Log("Wrote from " + prevIndex + " to " + streamedAudio.writeIndex + ", Played from " + prevTime + " to " + streamedAudio.audioSource.timeSamples);
-
-                prevTime = streamedAudio.audioSource.timeSamples;
-
-                if (!streamedAudio.audioSource.isPlaying)
-                {
-                    streamedAudio.audioSource.Play();
-                }
-            }
-
-            yield return null;
-        }
-    }
-
-
+    } 
 }
 
 /*// Custom editor functionality for audio plugin
